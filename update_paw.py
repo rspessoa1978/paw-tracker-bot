@@ -1,7 +1,7 @@
 import os
 import pandas as pd
 from pathlib import Path
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta, datetime, timezone
 from typing import Optional
 
 try:
@@ -26,8 +26,13 @@ SEARCH_TERMS = (
     ')'
 )
 
-def yyyymmdd(d: date) -> str:
-    return d.strftime("%Y%m%d")
+def unix_seconds(d: date) -> int:
+    """
+    Converte data para timestamp Unix (segundos desde epoch) em UTC (meia-noite).
+    Corrige o problema do Scopus interpretar YYYYMMDD incorretamente.
+    """
+    dt = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=timezone.utc)
+    return int(dt.timestamp())
 
 def init_pybliometrics() -> None:
     """
@@ -78,11 +83,15 @@ def get_last_added_date(df: pd.DataFrame) -> Optional[date]:
     return None
 
 def build_query(day_start: date, day_end: date) -> str:
+    # Converte para Unix Timestamp para evitar erro de interpretação da API
+    aft = unix_seconds(day_start)
+    bef = unix_seconds(day_end)
+    
     # Janela [AFT day_start, BEF day_end)
     return (
         f"{SEARCH_TERMS} "
-        f"AND ORIG-LOAD-DATE AFT {yyyymmdd(day_start)} "
-        f"AND ORIG-LOAD-DATE BEF {yyyymmdd(day_end)}"
+        f"AND ORIG-LOAD-DATE AFT {aft} "
+        f"AND ORIG-LOAD-DATE BEF {bef}"
     )
 
 def daterange(d0: date, d1: date):
@@ -93,24 +102,51 @@ def daterange(d0: date, d1: date):
 
 def scopus_daily_search(start_date: date, end_date: date):
     """
-    Busca no Scopus dia-a-dia para evitar exceder limite de 5000 resultados por query.
+    Busca no Scopus dia-a-dia. Se estourar o limite (Scopus400Error),
+    tenta subdividir por Ano de Publicação (fallback).
     """
     from pybliometrics.scopus import ScopusSearch
     from pybliometrics.exception import Scopus400Error, ScopusQueryError
 
     all_results = []
-    for d in daterange(start_date, end_date):
-        q = build_query(d, d + timedelta(days=1))
-        try:
-            s = ScopusSearch(q, refresh=True, subscriber=False)
-        except (Scopus400Error, ScopusQueryError) as e:
-            raise RuntimeError(
-                f"Falha na busca para {d.isoformat()} (janela diária). "
-                f"Erro: {type(e).__name__}: {e}"
-            ) from e
+    
+    # Anos para fallback (ex: últimos 25 anos + futuro próximo)
+    fallback_years = list(range(2000, end_date.year + 2))
 
-        if getattr(s, "results", None):
-            all_results.extend(s.results)
+    for d in daterange(start_date, end_date):
+        # Janela de 1 dia (timestamp start a timestamp end)
+        q_base = build_query(d, d + timedelta(days=1))
+        
+        try:
+            # Tentativa padrão: busca o dia inteiro
+            s = ScopusSearch(q_base, refresh=True, subscriber=False)
+            if getattr(s, "results", None):
+                all_results.extend(s.results)
+        
+        except (Scopus400Error, ScopusQueryError) as e:
+            # Se for erro de limite (400), ativa o Plano B: quebrar por ano
+            error_msg = str(e).lower()
+            if "exceeds the maximum number" in error_msg or isinstance(e, Scopus400Error):
+                print(f"⚠ Aviso: Limite excedido para {d}. Tentando subdividir por PUBYEAR...", flush=True)
+                
+                found_in_fallback = 0
+                for year in fallback_years:
+                    q_fallback = f"{q_base} AND PUBYEAR = {year}"
+                    try:
+                        s_sub = ScopusSearch(q_fallback, refresh=True, subscriber=False)
+                        if getattr(s_sub, "results", None):
+                            all_results.extend(s_sub.results)
+                            found_in_fallback += len(s_sub.results)
+                    except Exception as sub_e:
+                        print(f"  Erro no fallback ano {year}: {sub_e}", flush=True)
+                
+                print(f"  Recuperados {found_in_fallback} registros via fallback para {d}.", flush=True)
+            else:
+                # Se for outro erro (ex: 500, timeout), relança
+                raise RuntimeError(
+                    f"Falha crítica na busca para {d.isoformat()}. "
+                    f"Erro: {type(e).__name__}: {e}"
+                ) from e
 
     return all_results
 
