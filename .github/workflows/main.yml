@@ -32,13 +32,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-         ims:TZ: America/Sao_Paulo
           pip install "pybliometrics>=4" pandas openpyxl google-genai
 
       - name: Run Update Script
         env:
           SCOPUS_API_KEY: ${{ secrets.SCOPUS_API_KEY }}
-          SCOPUS_INST_TOKEN: ${{ secrets.SCOPUS_INST_TOKEN }}   # opcional
+          SCOPUS_INST_TOKEN: ${{ secrets.SCOPUS_INST_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PYBLIOMETRICS_CONFIG_PATH: /home/runner/.config/pybliometrics.cfg
           PYTHONUNBUFFERED: "1"
@@ -50,12 +49,9 @@ jobs:
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action Bot"
 
-          # Só continua se database.xlsx mudou
           if git status --porcelain | grep -q "database.xlsx"; then
             git add database.xlsx
             git commit -m "Auto-update: Novos papers de PAW adicionados [skip ci]"
-
-            # Evita falha por atualização remota concorrente
             git pull --rebase
             git push
           else
