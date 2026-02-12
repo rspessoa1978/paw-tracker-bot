@@ -2,12 +2,17 @@ name: Update PAW Data
 
 on:
   schedule:
-    - cron: '0 5 * * *' # Executa todos os dias às 05:00 AM
-  workflow_dispatch:      # Permite rodar manualmente pelo botão "Run workflow"
+    - cron: '0 5 * * *' # Executa automaticamente todos os dias às 05:00 AM (UTC)
+  workflow_dispatch:      # Permite que você execute manualmente clicando no botão "Run workflow"
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    
+    # Dá permissão para o bot gravar as alterações na planilha de volta no repositório
+    permissions:
+      contents: write
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -15,7 +20,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11' # Versão atualizada
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
@@ -25,9 +30,13 @@ jobs:
         env:
           SCOPUS_API_KEY: ${{ secrets.SCOPUS_API_KEY }}
         run: |
+          # Cria o diretório de configuração do Scopus
           mkdir -p ~/.scopus
+          # Gera o arquivo config.ini necessário para a biblioteca pybliometrics
           echo "[Authentication]" > ~/.scopus/config.ini
           echo "APIKey = $SCOPUS_API_KEY" >> ~/.scopus/config.ini
+          # Cria diretórios de cache para evitar erros de escrita
+          mkdir -p ~/.scopus/scopus_search
 
       - name: Run Update Script
         env:
@@ -39,6 +48,7 @@ jobs:
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add .
+          git add database.xlsx
+          # O comando abaixo evita erro caso não haja novos artigos no dia
           git commit -m "Auto-update PAW database [skip ci]" || echo "No changes to commit"
           git push
