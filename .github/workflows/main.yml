@@ -2,15 +2,15 @@ name: Update PAW Data
 
 on:
   schedule:
-    - cron: '0 5 * * *' # Executa todos os dias às 05:00 AM
-  workflow_dispatch:      # Permite execução manual
+    - cron: '0 5 * * *' # Corre todos os dias às 05:00 AM
+  workflow_dispatch:      # Permite correr manualmente no botão "Run workflow"
 
 jobs:
   build:
     runs-on: ubuntu-latest
     
     permissions:
-      contents: write # Permite que o bot salve as alterações no Excel
+      contents: write # Essencial para o bot poder salvar o Excel
 
     steps:
       - name: Checkout repository
@@ -25,18 +25,6 @@ jobs:
         run: |
           pip install pybliometrics pandas google-genai openpyxl
 
-      - name: Setup Scopus Config
-        env:
-          SCOPUS_API_KEY: ${{ secrets.SCOPUS_API_KEY }}
-        run: |
-          # Cria a pasta oculta onde a biblioteca procura a configuração
-          mkdir -p ~/.scopus
-          # Gera o arquivo config.ini com a sua chave
-          echo "[Authentication]" > ~/.scopus/config.ini
-          echo "APIKey = $SCOPUS_API_KEY" >> ~/.scopus/config.ini
-          # Cria a pasta de cache para evitar erros de leitura/escrita
-          mkdir -p ~/.scopus/scopus_search
-
       - name: Run Update Script
         env:
           SCOPUS_API_KEY: ${{ secrets.SCOPUS_API_KEY }}
@@ -48,5 +36,5 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add database.xlsx
-          git commit -m "Auto-update PAW database [skip ci]" || echo "No changes to commit"
+          git commit -m "Auto-update PAW database [skip ci]" || echo "Sem alterações para salvar"
           git push
