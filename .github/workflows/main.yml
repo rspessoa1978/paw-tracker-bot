@@ -2,15 +2,15 @@ name: Update PAW Data
 
 on:
   schedule:
-    - cron: '0 5 * * *' # Corre todos os dias às 05:00 AM
-  workflow_dispatch:      # Permite correr manualmente no botão "Run workflow"
+    - cron: '0 5 * * *'
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     
     permissions:
-      contents: write # Essencial para o bot poder salvar o Excel
+      contents: write # Permite salvar o Excel de volta no GitHub
 
     steps:
       - name: Checkout repository
@@ -33,8 +33,8 @@ jobs:
 
       - name: Commit and Push changes
         run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action Bot"
           git add database.xlsx
-          git commit -m "Auto-update PAW database [skip ci]" || echo "Sem alterações para salvar"
+          git commit -m "Auto-update: Novos papers de PAW adicionados [skip ci]" || echo "Sem alterações"
           git push
