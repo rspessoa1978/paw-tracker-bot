@@ -1,14 +1,31 @@
 import os
 import json
 import pandas as pd
-from google import genai
+from pathlib import Path
+
+# --- AUTO-CONFIGURAÇÃO DO SCOPUS ---
+# Isto resolve o erro 'FileNotFoundError: No configuration file found'
+def setup_scopus():
+    scopus_dir = Path.home() / ".scopus"
+    scopus_dir.mkdir(exist_ok=True)
+    config_file = scopus_dir / "config.ini"
+    
+    scopus_key = os.getenv("SCOPUS_API_KEY")
+    if scopus_key:
+        with open(config_file, "w") as f:
+            f.write(f"[Authentication]\nAPIKey = {scopus_key}\n")
+        print("Configuração do Scopus realizada com sucesso.")
+    else:
+        print("Erro: SCOPUS_API_KEY não encontrada nas variáveis de ambiente.")
+
+setup_scopus()
+
+# Imports que dependem da configuração acima
 from pybliometrics.scopus import ScopusSearch
-from datetime import datetime
+from google import genai
 
-# --- CONFIGURAÇÃO ---
-FILE_NAME = 'database.xlsx'  # Nome exato do ficheiro no GitHub
-
-# Inicializa o cliente Gemini
+# --- CONFIGURAÇÃO DE FICHEIROS E IA ---
+FILE_NAME = 'database.xlsx'
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 def ask_gemini_classification(title, abstract):
@@ -17,11 +34,11 @@ def ask_gemini_classification(title, abstract):
     Título: {title}
     Abstract: {abstract}
 
-    Retorne APENAS um objeto JSON com estas chaves exatas (use 1 para presente e 0 para ausente):
+    Retorne APENAS um JSON (use 1 para presente e 0 para ausente):
     {{
         "Domain": "Agriculture, Food Systems, Biomedical, Fundamentals ou Environmental",
-        "Reactor": "Nome do reator",
-        "Gas": "Gás utilizado",
+        "Reactor": "Tipo de reator",
+        "Gas": "Gás usado",
         "Time": 1,
         "Power": 1,
         "pH": 1,
@@ -30,14 +47,11 @@ def ask_gemini_classification(title, abstract):
         "H2O2": 1,
         "NO2": 1,
         "NO3": 1,
-        "Endpoint": "Principal resultado/alvo"
+        "Endpoint": "Alvo principal"
     }}
     """
     try:
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt
-        )
+        response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
         clean_json = response.text.replace('```json', '').replace('```', '').strip()
         return json.loads(clean_json)
     except Exception as e:
@@ -46,27 +60,22 @@ def ask_gemini_classification(title, abstract):
 
 def main():
     if not os.path.exists(FILE_NAME):
-        print(f"Erro: O arquivo {FILE_NAME} não foi encontrado.")
+        print(f"Erro: O ficheiro {FILE_NAME} não existe no repositório.")
         return
 
-    # MUDANÇA: Leitura de Excel em vez de CSV
     df = pd.read_excel(FILE_NAME)
-    
-    # Garante que a coluna DOI existe para evitar erros
-    if 'DOI_clean' not in df.columns:
-        print("Erro: A coluna 'DOI_clean' não existe na planilha.")
-        return
-        
     existing_dois = set(df['DOI_clean'].dropna().astype(str).unique())
 
+    # Procura papers de PAW (últimas publicações)
     query = 'TITLE-ABS-KEY("plasma-activated water" OR "plasma-activated liquids")'
+    print("Iniciando busca no Scopus...")
     search = ScopusSearch(query, refresh=True)
     
     new_rows = []
     if search.results:
         for res in search.results:
             if res.doi not in existing_dois and res.doi:
-                print(f"Classificando: {res.title}")
+                print(f"Novo paper encontrado: {res.title}")
                 data = ask_gemini_classification(res.title, res.description)
                 
                 if data:
@@ -95,11 +104,10 @@ def main():
 
     if new_rows:
         updated_df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
-        # MUDANÇA: Escrita em Excel
         updated_df.to_excel(FILE_NAME, index=False)
-        print(f"Sucesso: {len(new_rows)} novos itens adicionados.")
+        print(f"Sucesso: {len(new_rows)} novos artigos adicionados.")
     else:
-        print("Nenhuma novidade hoje.")
+        print("Nenhum artigo novo para adicionar.")
 
 if __name__ == "__main__":
     main()
