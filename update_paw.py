@@ -1,133 +1,192 @@
 import os
-import json
-import re
 import pandas as pd
 from pathlib import Path
+from datetime import date, timedelta
+from zoneinfo import ZoneInfo
 
-from google import genai
+# =====================
+# CONFIGURAÇÕES
+# =====================
+TZ = ZoneInfo("America/Sao_Paulo")
+FILE_NAME = Path(__file__).with_name("database.xlsx")
 
-# --- CONFIGURAÇÕES ---
-FILE_NAME = "database.xlsx"
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+BOT_DATE_COL = "Added_to_db"     # coluna de controle (data que o bot adicionou)
+OVERLAP_DAYS = 2                 # sobreposição para não perder nada por fuso/atrasos
+MAX_FILL_PER_RUN = 0             # 0 = desliga "completar lacunas" (opcional)
 
-def setup_pybliometrics():
+SEARCH_TERMS = (
+    'TITLE-ABS-KEY('
+    '"plasma-activated water" OR "plasma activated water" OR '
+    '"plasma-activated liquid*" OR "plasma activated liquid*" OR '
+    '"plasma-activated liquids" OR "plasma activated liquids"'
+    ')'
+)
+
+def yyyymmdd(d: date) -> str:
+    return d.strftime("%Y%m%d")
+
+def init_pybliometrics():
     """
-    Inicializa o pybliometrics de forma não-interativa (ideal para CI),
-    criando o arquivo pybliometrics.cfg no caminho definido.
+    Inicializa pybliometrics criando/atualizando a config automaticamente.
+    Evita o erro 'Please initialize Pybliometrics with init()'.
     """
-    scopus_key_env = os.getenv("SCOPUS_API_KEY", "").strip()
-    if not scopus_key_env:
+    api_key = os.getenv("SCOPUS_API_KEY")
+    if not api_key:
         raise RuntimeError("SCOPUS_API_KEY não encontrada nas variáveis de ambiente.")
+    import pybliometrics.scopus
+    # Cria config em ~/.config/pybliometrics.cfg e injeta a(s) chave(s)
+    pybliometrics.scopus.init(keys=[api_key])
 
-    # Permite múltiplas chaves separadas por vírgula
-    keys = [k.strip() for k in scopus_key_env.split(",") if k.strip()]
-
-    # InstToken é opcional (útil fora da rede/VPN da instituição)
-    inst_env = os.getenv("SCOPUS_INST_TOKEN", "").strip()
-    inst_tokens = [t.strip() for t in inst_env.split(",") if t.strip()] if inst_env else None
-
-    # Caminho explícito para evitar ambiguidades de HOME em CI
-    # Você pode deixar o default (~/.config/pybliometrics.cfg) ou fixar no workspace.
-    default_cfg = Path.home() / ".config" / "pybliometrics.cfg"
-    config_path = Path(os.getenv("PYBLIOMETRICS_CONFIG_PATH", str(default_cfg)))
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-
-    import pybliometrics
-    pybliometrics.init(config_path=config_path, keys=keys, inst_tokens=inst_tokens)
-
-    print(f"✓ pybliometrics inicializado. Config: {config_path}", flush=True)
-
-def ask_gemini_classification(title, abstract):
-    prompt = (
-        f"Analise o artigo sobre PAW: {title}. "
-        f"Abstract: {abstract or ''}. "
-        "Retorne APENAS um JSON com as chaves: "
-        "Domain, Reactor, Gas, Time, Power, pH, ORP, Cond, H2O2, NO2, NO3, Endpoint."
-    )
-    try:
-        response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
-
-        # Extrai o primeiro objeto JSON do texto (mais robusto que replace de fences)
-        m = re.search(r"\{.*\}", response.text, flags=re.DOTALL)
-        if not m:
-            raise ValueError(f"Resposta do Gemini não contém JSON válido. Texto: {response.text[:300]}")
-
-        return json.loads(m.group(0))
-    except Exception as e:
-        print(f"Erro IA: {e}", flush=True)
-        return None
-
-def main():
-    # 1) Inicializa pybliometrics ANTES de importar classes Scopus
-    setup_pybliometrics()
-
-    # 2) Import tardio (ok) depois do init
-    from pybliometrics.scopus import ScopusSearch
-
-    if not os.path.exists(FILE_NAME):
-        print(f"Erro: O arquivo {FILE_NAME} não foi encontrado.", flush=True)
-        return
-
-    print("Lendo banco de dados...", flush=True)
+def load_db() -> pd.DataFrame:
+    if not FILE_NAME.exists():
+        raise FileNotFoundError(f"Arquivo não encontrado: {FILE_NAME}")
     df = pd.read_excel(FILE_NAME)
 
-    if "DOI_clean" in df.columns:
-        existing_dois = set(df["DOI_clean"].dropna().astype(str).str.strip().unique())
-    else:
-        existing_dois = set()
+    # Garante a coluna de controle
+    if BOT_DATE_COL not in df.columns:
+        df[BOT_DATE_COL] = pd.NaT
 
-    print("Iniciando busca no Scopus...", flush=True)
+    return df
 
-    query = 'TITLE-ABS-KEY("plasma-activated water" OR "plasma-activated liquids")'
+def get_last_added_date(df: pd.DataFrame) -> date | None:
+    s = pd.to_datetime(df[BOT_DATE_COL], errors="coerce")
+    if s.notna().any():
+        return s.max().date()
+    return None
 
-    # Em CI, frequentemente você NÃO está na rede/VPN institucional.
-    # subscriber=False reduz a chance de 401 (mas pode limitar campos retornados).
-    search = ScopusSearch(query, refresh=True, subscriber=False)
+def build_query(day_start: date, day_end: date) -> str:
+    # Janela [AFT day_start, BEF day_end)
+    return (
+        f"{SEARCH_TERMS} "
+        f"AND ORIG-LOAD-DATE AFT {yyyymmdd(day_start)} "
+        f"AND ORIG-LOAD-DATE BEF {yyyymmdd(day_end)}"
+    )
+
+def daterange(d0: date, d1: date):
+    """Itera d0, d0+1, ..., d1-1"""
+    d = d0
+    while d < d1:
+        yield d
+        d += timedelta(days=1)
+
+def scopus_daily_search(start_date: date, end_date: date):
+    """
+    Busca no Scopus dia-a-dia para evitar exceder limite de 5000 resultados por query.
+    """
+    from pybliometrics.scopus import ScopusSearch
+    from pybliometrics.scopus.exception import Scopus400Error
+
+    all_results = []
+    for d in daterange(start_date, end_date):
+        q = build_query(d, d + timedelta(days=1))
+        try:
+            s = ScopusSearch(q, refresh=True, subscriber=False)
+        except Scopus400Error as e:
+            # Se isso acontecer num dia, a janela ainda está grande para seu nível de acesso.
+            # Para PAW é improvável, mas deixamos uma mensagem clara.
+            raise RuntimeError(
+                f"Consulta diária ainda excedeu o limite em {d.isoformat()}. "
+                f"Tente restringir mais o SEARCH_TERMS ou adicionar PUBYEAR."
+            ) from e
+
+        if s.results:
+            all_results.extend(s.results)
+
+    return all_results
+
+def append_new_rows(df: pd.DataFrame, results, today: date) -> pd.DataFrame:
+    # EID é sempre o identificador mais confiável (no seu arquivo, EID está completo).
+    existing_eids = set(df["EID"].astype(str).str.strip())
+
+    # DOI ajuda, mas pode faltar; então usamos EID como chave principal.
+    existing_dois = set(
+        df["DOI_clean"].dropna().astype(str).str.strip()
+    ) if "DOI_clean" in df.columns else set()
 
     new_rows = []
-    if getattr(search, "results", None):
-        for res in search.results:
-            doi = (res.doi or "").strip()
-            if not doi or doi in existing_dois:
-                continue
+    for r in results:
+        eid = (getattr(r, "eid", None) or "").strip()
+        if not eid:
+            continue
 
-            title = (res.title or "").strip()
-            abstract = (getattr(res, "description", None) or "").strip()
+        if eid in existing_eids:
+            continue
 
-            print(f"Novo paper encontrado: {title}", flush=True)
+        doi = (getattr(r, "doi", None) or "").strip()
+        if doi and doi in existing_dois:
+            # Já existe por DOI (caso raro se EID mudou/duplicou)
+            continue
 
-            data = ask_gemini_classification(title, abstract)
-            if not data:
-                continue
+        cover = getattr(r, "coverDate", None)
+        year = cover.split("-")[0] if cover else None
 
-            core6_fields = ["pH", "ORP", "Cond", "H2O2", "NO2", "NO3"]
-            core6_count = sum(1 for k in core6_fields if data.get(k) is not None)
+        row = {c: None for c in df.columns}
+        row["PAW (cleaned)"] = "YES"
+        row["Screening status"] = "NEW"
+        row["Year"] = year
+        row["Title"] = getattr(r, "title", None)
+        row["Authors"] = getattr(r, "author_names", None)
+        row["Source title"] = getattr(r, "publicationName", None)
+        row["Document Type"] = getattr(r, "subtypeDescription", None)
+        row["Cited by"] = getattr(r, "citedby_count", None)
+        row["DOI_clean"] = doi if doi else None
+        row["Link"] = getattr(r, "scopus_url", None)
+        row["Abstract"] = getattr(r, "description", None)
+        row["Author Keywords"] = getattr(r, "authkeywords", None)
+        row["EID"] = eid
+        row[BOT_DATE_COL] = today.isoformat()
 
-            year = None
-            if getattr(res, "coverDate", None):
-                year = str(res.coverDate).split("-")[0]
+        new_rows.append(row)
 
-            new_rows.append({
-                "PAW (cleaned)": "YES",
-                "Year": year,
-                "Title": title,
-                "Authors": getattr(res, "author_names", None),
-                "Source title": getattr(res, "publicationName", None),
-                "DOI_clean": doi,
-                "Abstract": abstract,
-                "Domain (auto)": data.get("Domain"),
-                "Core6_pH (auto)": data.get("pH"),
-                "Core6_H2O2 (auto)": data.get("H2O2"),
-                "Core6 count": core6_count,
-                "Endpoint (auto)": data.get("Endpoint"),
-            })
+    if not new_rows:
+        return df
 
-    if new_rows:
-        updated_df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
-        updated_df.to_excel(FILE_NAME, index=False)
-        print(f"Sucesso: {len(new_rows)} novos artigos adicionados.", flush=True)
+    out = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
+
+    # Marca duplicidade de DOI (se a coluna existir)
+    if "Duplicate DOI" in out.columns and "DOI_clean" in out.columns:
+        dois = out["DOI_clean"].astype(str)
+        mask_valid = out["DOI_clean"].notna()
+        dup = dois.duplicated(keep=False) & mask_valid
+        out.loc[dup, "Duplicate DOI"] = "YES"
+
+    # Ordena para a “primeira linha” ser sempre a mais recente do bot
+    out[BOT_DATE_COL] = pd.to_datetime(out[BOT_DATE_COL], errors="coerce")
+    out = out.sort_values(by=[BOT_DATE_COL, "Year"], ascending=[False, False], na_position="last")
+
+    return out
+
+def save_db(df: pd.DataFrame):
+    df.to_excel(FILE_NAME, index=False)
+
+def main():
+    init_pybliometrics()
+
+    df = load_db()
+    today = date.today() if TZ is None else date.fromtimestamp(__import__("time").time())
+
+    # Melhor: usar timezone do Brasil
+    today = __import__("datetime").datetime.now(TZ).date()
+
+    last = get_last_added_date(df)
+
+    # Se for a primeira execução (sem Added_to_db preenchido), comece pequeno para não estourar limite.
+    if last is None:
+        start = today - timedelta(days=1)
     else:
-        print("Nenhuma novidade encontrada no Scopus hoje.", flush=True)
+        start = last - timedelta(days=OVERLAP_DAYS)
+
+    end = today + timedelta(days=1)  # inclui "hoje"
+    print(f"Atualização incremental: {start.isoformat()} até {today.isoformat()} (ORIG-LOAD-DATE).")
+
+    results = scopus_daily_search(start, end)
+    print(f"Resultados Scopus (janela incremental): {len(results)}")
+
+    updated = append_new_rows(df, results, today)
+    added = len(updated) - len(df)
+    save_db(updated)
+
+    print(f"Concluído. Novas linhas adicionadas: {added}")
 
 if __name__ == "__main__":
     main()

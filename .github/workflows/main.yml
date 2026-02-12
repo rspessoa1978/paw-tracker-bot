@@ -2,39 +2,62 @@ name: Update PAW Data
 
 on:
   schedule:
-    - cron: '0 5 * * *'
+    - cron: '0 8 * * *'  # 08:00 UTC = 05:00 America/Sao_Paulo
   workflow_dispatch:
+
+concurrency:
+  group: paw-update
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    
+
     permissions:
-      contents: write # Permite salvar o Excel de volta no GitHub
+      contents: write
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
-          pip install pybliometrics pandas google-genai openpyxl
+          python -m pip install --upgrade pip
+         ims:TZ: America/Sao_Paulo
+          pip install "pybliometrics>=4" pandas openpyxl google-genai
 
       - name: Run Update Script
         env:
           SCOPUS_API_KEY: ${{ secrets.SCOPUS_API_KEY }}
+          SCOPUS_INST_TOKEN: ${{ secrets.SCOPUS_INST_TOKEN }}   # opcional
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PYBLIOMETRICS_CONFIG_PATH: /home/runner/.config/pybliometrics.cfg
+          PYTHONUNBUFFERED: "1"
+          TZ: America/Sao_Paulo
         run: python update_paw.py
 
       - name: Commit and Push changes
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action Bot"
-          git add database.xlsx
-          git commit -m "Auto-update: Novos papers de PAW adicionados [skip ci]" || echo "Sem alterações"
-          git push
+
+          # Só continua se database.xlsx mudou
+          if git status --porcelain | grep -q "database.xlsx"; then
+            git add database.xlsx
+            git commit -m "Auto-update: Novos papers de PAW adicionados [skip ci]"
+
+            # Evita falha por atualização remota concorrente
+            git pull --rebase
+            git push
+          else
+            echo "Sem alterações no database.xlsx"
+          fi
