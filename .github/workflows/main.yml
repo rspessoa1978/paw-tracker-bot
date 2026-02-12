@@ -3,7 +3,7 @@ name: Update PAW Data
 on:
   schedule:
     - cron: '0 5 * * *' # Executa todos os dias às 05:00 AM
-  workflow_dispatch:      # Permite que você execute manualmente clicando num botão
+  workflow_dispatch:      # Permite rodar manualmente pelo botão "Run workflow"
 
 jobs:
   build:
@@ -15,15 +15,19 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
+          python-version: '3.11' # Versão atualizada
 
       - name: Install dependencies
-        run: pip install pybliometrics pandas google-generativeai openpyxl
+        run: |
+          pip install pybliometrics pandas google-genai openpyxl
 
       - name: Setup Scopus Config
         env:
           SCOPUS_API_KEY: ${{ secrets.SCOPUS_API_KEY }}
-        run: python setup_scopus.py
+        run: |
+          mkdir -p ~/.scopus
+          echo "[Authentication]" > ~/.scopus/config.ini
+          echo "APIKey = $SCOPUS_API_KEY" >> ~/.scopus/config.ini
 
       - name: Run Update Script
         env:
@@ -36,5 +40,5 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add .
-          git commit -m "Auto-update PAW spreadsheet [skip ci]" || echo "No changes to commit"
+          git commit -m "Auto-update PAW database [skip ci]" || echo "No changes to commit"
           git push
