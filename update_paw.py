@@ -3,32 +3,24 @@ import json
 import pandas as pd
 from pathlib import Path
 
-# =================================================================
-# 1. CONFIGURAÇÃO DO AMBIENTE (DEVE EXECUTAR ANTES DE QUALQUER IMPORT DO SCOPUS)
-# =================================================================
-def bootstrap_scopus():
-    scopus_dir = Path.home() / ".scopus"
-    scopus_dir.mkdir(exist_ok=True)
-    config_file = scopus_dir / "config.ini"
-    
-    scopus_key = os.getenv("SCOPUS_API_KEY")
-    if scopus_key:
-        with open(config_file, "w") as f:
-            f.write(f"[Authentication]\nAPIKey = {scopus_key}\n")
-        print("✓ Configuração do Scopus criada com sucesso no disco.")
-    else:
-        print("! AVISO: SCOPUS_API_KEY não encontrada nas variáveis de ambiente.")
+# 1. ESTE BLOCO DEVE VIR ANTES DE QUALQUER OUTRO IMPORT DO SCOPUS
+scopus_dir = Path.home() / ".scopus"
+scopus_dir.mkdir(exist_ok=True)
+config_file = scopus_dir / "config.ini"
 
-# Executa a criação do ficheiro imediatamente
-bootstrap_scopus()
+scopus_key = os.getenv("SCOPUS_API_KEY")
+if scopus_key:
+    with open(config_file, "w") as f:
+        f.write(f"[Authentication]\nAPIKey = {scopus_key}\n")
+    print("✓ Configuração do Scopus injetada com sucesso.")
+else:
+    print("! Erro: SCOPUS_API_KEY não encontrada no ambiente.")
 
-# =================================================================
-# 2. AGORA SIM, IMPORTAR AS BIBLIOTECAS QUE DEPENDEM DO CONFIG.INI
-# =================================================================
+# 2. SÓ AGORA IMPORTAMOS AS BIBLIOTECAS QUE DEPENDEM DO ARQUIVO ACIMA
 from pybliometrics.scopus import ScopusSearch
 from google import genai
 
-# --- CONFIGURAÇÕES DO PROJECTO ---
+# --- CONFIGURAÇÕES ---
 FILE_NAME = 'database.xlsx'
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
@@ -38,7 +30,7 @@ def ask_gemini_classification(title, abstract):
     Título: {title}
     Abstract: {abstract}
 
-    Retorne APENAS um JSON (use 1 para presente e 0 para ausente):
+    Retorne APENAS um JSON:
     {{
         "Domain": "Agriculture, Food Systems, Biomedical, Fundamentals ou Environmental",
         "Reactor": "Tipo de reator",
@@ -59,21 +51,16 @@ def ask_gemini_classification(title, abstract):
         clean_json = response.text.replace('```json', '').replace('```', '').strip()
         return json.loads(clean_json)
     except Exception as e:
-        print(f"Erro na classificação IA: {e}")
+        print(f"Erro IA: {e}")
         return None
 
 def main():
     if not os.path.exists(FILE_NAME):
-        print(f"Erro crítico: O ficheiro {FILE_NAME} não foi encontrado no repositório.")
+        print(f"Erro: {FILE_NAME} não encontrado.")
         return
 
     print("A carregar base de dados...")
     df = pd.read_excel(FILE_NAME)
-    
-    if 'DOI_clean' not in df.columns:
-        print("Erro: Coluna 'DOI_clean' não encontrada no Excel.")
-        return
-
     existing_dois = set(df['DOI_clean'].dropna().astype(str).unique())
 
     print("A pesquisar novos artigos no Scopus...")
@@ -116,7 +103,7 @@ def main():
         updated_df.to_excel(FILE_NAME, index=False)
         print(f"Sucesso: {len(new_rows)} novos artigos adicionados.")
     else:
-        print("A planilha já está atualizada. Nada a acrescentar.")
+        print("Planilha já atualizada.")
 
 if __name__ == "__main__":
     main()
