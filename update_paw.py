@@ -84,51 +84,48 @@ def daterange(d0: date, d1: date):
 
 def scopus_daily_search(start_date: date, end_date: date):
     from pybliometrics.scopus import ScopusSearch
-    from pybliometrics.exception import Scopus400Error, ScopusQueryError
+    # Adicionado Scopus401Error para tratar chaves sem assinatura
+    from pybliometrics.exception import Scopus400Error, ScopusQueryError, Scopus401Error
 
     all_results = []
     # Fallback: anos de 2000 até o ano atual + 1
     fallback_years = list(range(2000, end_date.year + 2))
 
     for d in daterange(start_date, end_date):
-        # Define janela de 1 dia: AFT dia_atual E BEF dia_seguinte
-        # Ex: AFT 20240101 AND BEF 20240103 pega o dia 02 (dependendo do fuso do Scopus)
-        # Para segurança, usamos intervalo aberto nas pontas
         q_base = build_query(d, d + timedelta(days=2))
         
-        # Tenta primeiro como Subscriber=True (limites maiores), se falhar, tenta False
         try:
+            # 1. TENTA MODO ASSINANTE (Subscriber=True)
+            # Se a chave não for institucional, vai gerar Scopus401Error aqui.
+            s = ScopusSearch(q_base, refresh=True, subscriber=True)
+            if getattr(s, "results", None):
+                all_results.extend(s.results)
+
+        except (Scopus401Error, Scopus400Error, ScopusQueryError):
+            # 2. SE FALHAR (Não autorizado ou Erro de Query), TENTA MODO GRATUITO (Subscriber=False)
             try:
-                # Tenta busca direta
-                s = ScopusSearch(q_base, refresh=True, subscriber=True)
-                if getattr(s, "results", None):
-                    all_results.extend(s.results)
-            except (Scopus400Error, ScopusQueryError):
-                # Se falhar como subscriber ou der limite, tenta subscriber=False
                 s = ScopusSearch(q_base, refresh=True, subscriber=False)
                 if getattr(s, "results", None):
                     all_results.extend(s.results)
-
-        except (Scopus400Error, ScopusQueryError) as e:
-            error_msg = str(e).lower()
-            if "exceeds" in error_msg or isinstance(e, Scopus400Error):
-                print(f"⚠ Limite atingido em {d}. Ativando fallback por ano...", flush=True)
-                
-                for year in fallback_years:
-                    q_sub = f"{q_base} AND PUBYEAR = {year}"
-                    try:
-                        # Tenta subscriber=True primeiro no fallback também
+            
+            except (Scopus400Error, ScopusQueryError) as e:
+                # 3. SE FALHAR NO MODO GRATUITO (Provavelmente Limite Excedido - Erro 400)
+                # Ativa o fallback por ano
+                error_msg = str(e).lower()
+                if "exceeds" in error_msg or isinstance(e, Scopus400Error):
+                    print(f"⚠ Limite atingido em {d} (Modo Free). Ativando fallback por ano...", flush=True)
+                    
+                    for year in fallback_years:
+                        q_sub = f"{q_base} AND PUBYEAR = {year}"
                         try:
-                            s_sub = ScopusSearch(q_sub, refresh=True, subscriber=True)
-                        except:
+                            # Tenta busca fracionada (sempre subscriber=False aqui para garantir)
                             s_sub = ScopusSearch(q_sub, refresh=True, subscriber=False)
-
-                        if getattr(s_sub, "results", None):
-                            all_results.extend(s_sub.results)
-                    except Exception:
-                        pass # Ignora erros em anos vazios
-            else:
-                print(f"Erro ignorado em {d}: {e}")
+                            if getattr(s_sub, "results", None):
+                                all_results.extend(s_sub.results)
+                        except Exception:
+                            pass # Ignora anos sem resultados
+                else:
+                    print(f"Erro irrecuperável em {d}: {e}")
 
     return all_results
 
@@ -195,7 +192,6 @@ def main():
 
     last = get_last_added_date(df)
     
-    # Se last for None (primeira vez), pega ultimos 2 dias
     if last is None:
         start = today - timedelta(days=2)
     else:
