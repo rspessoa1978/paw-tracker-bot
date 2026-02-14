@@ -2,7 +2,7 @@ name: Update PAW Data
 
 on:
   schedule:
-    - cron: '0 8 * * *'  # 08:00 UTC = 05:00 America/Sao_Paulo
+    - cron: 
   workflow_dispatch:
 
 concurrency:
